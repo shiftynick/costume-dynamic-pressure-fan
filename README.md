@@ -13,6 +13,12 @@ works for any single-blower inflatable.
 > **Status:** working on real hardware. Pressure sensing, PI fan control, and
 > BLE telemetry are all functional.
 
+## Demo
+
+[![Watch the demo](docs/demo-poster.jpg)](docs/demo.mp4)
+
+*Click the image to play ([docs/demo.mp4](docs/demo.mp4)).*
+
 ---
 
 ## How it works
