@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Costume Dynamic Pressure Fan</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.6; color: #1f2328; background: #ffffff;
+  max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 5rem;
+}
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; margin-top: 1.8em; margin-bottom: .6em; }
+h1 { font-size: 2rem; border-bottom: 1px solid #d8dee4; padding-bottom: .3em; margin-top: .2em; }
+h2 { font-size: 1.5rem; border-bottom: 1px solid #d8dee4; padding-bottom: .3em; }
+h3 { font-size: 1.2rem; }
+a { color: #0969da; text-decoration: none; }
+a:hover { text-decoration: underline; }
+p, ul, ol { margin: .6em 0; }
+hr { border: none; border-top: 1px solid #d8dee4; margin: 2em 0; }
+blockquote {
+  margin: 1em 0; padding: .25em 1em; color: #57606a;
+  border-left: .25em solid #d0d7de; background: #f6f8fa;
+}
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .88em; background: rgba(175,184,193,.2);
+  padding: .15em .4em; border-radius: 6px;
+}
+pre {
+  background: #f6f8fa; padding: 1em; border-radius: 8px; overflow-x: auto;
+  line-height: 1.45; border: 1px solid #d8dee4;
+}
+pre code { background: none; padding: 0; font-size: .82em; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; display: block; overflow-x: auto; }
+th, td { border: 1px solid #d0d7de; padding: .5em .8em; text-align: left; vertical-align: top; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(2n) td { background: #f6f8fa; }
+img { max-width: 100%; }
+.footer { margin-top: 4rem; padding-top: 1rem; border-top: 1px solid #d8dee4;
+          color: #8b949e; font-size: .85rem; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6edf3; background: #0d1117; }
+  h1, h2 { border-bottom-color: #30363d; }
+  a { color: #4493f8; }
+  blockquote { color: #9198a1; border-left-color: #30363d; background: #161b22; }
+  code { background: rgba(110,118,129,.4); }
+  pre { background: #161b22; border-color: #30363d; }
+  th, td { border-color: #30363d; }
+  th, tr:nth-child(2n) td { background: #161b22; }
+  hr, .footer { border-color: #30363d; }
+}
+</style>
+</head>
+<body>
+<h1 id="costume-dynamic-pressure-fan">Costume Dynamic Pressure Fan</h1>
+<p>Closed-loop blower controller for an inflatable costume. An <strong>ESP32-C3</strong> reads
+air pressure from a barometric sensor and drives a <strong>12 V blower</strong> through a
+MOSFET, holding the suit at a constant, configurable overpressure above ambient
+— so it stays firm whether the wearer is sitting still or walking around, and
+whether the weather or altitude shifts. Live telemetry streams over <strong>Bluetooth
+LE</strong> to a phone for tuning.</p>
+<p>Originally built to inflate the "Graboid" costume; the firmware is generic and
+works for any single-blower inflatable.</p>
+<blockquote>
+<p><strong>Status:</strong> working on real hardware. Pressure sensing, PI fan control, and
+BLE telemetry are all functional.</p>
+</blockquote>
+<hr>
+<h2 id="how-it-works">How it works</h2>
+<pre><code>   USB 5V ──── or ────► VBUS ◄──── 5V ──── Buck ◄──── 12V supply ─┐
+                          │                                        │
+                     ┌────┴─────────────────┐                      │
+                     │  SparkFun Pro Micro  │                      │
+                     │       ESP32-C3       │                      │
+                     │                      │                      │
+              Qwiic ─┤ GPIO5/6  (I2C)       │       ┌────────────┐ │
+                     │                      │ ─────►│ Adafruit   │ │
+                     │ GPIO7   (PWM 1 kHz)  │       │ MOSFET     │◄┤
+                     │ GPIO10  (status LED) │       │ PID 5648   │ │
+                     │ GND ───── common GND │       │            │ │
+                     └──────────────────────┘       └─────┬──────┘ │
+                              │                            │ switched GND
+                              │                            ▼       │
+                     ┌────────┴────────┐              ┌────────┐   │
+                     │   Adafruit      │              │ Delta  │◄──┘
+                     │   LPS22         │◄── ambient ──│ BFB1012│
+                     │   pressure      │              │ VH-AF00│
+                     │   sensor        │              │ blower │
+                     └─────────────────┘              └────────┘
+</code></pre>
+<ol>
+<li><strong>Sense</strong> — at boot, with the fan off, the firmware samples ambient pressure
+   as a <em>baseline</em>, then targets <code>baseline + 2.0 hPa</code> (configurable). The target
+   is relative so the suit holds the same <em>inflation</em> even as weather/altitude
+   change.</li>
+<li><strong>Actuate</strong> — a low-side N-MOSFET switches the 12 V blower; speed is set by
+   1 kHz PWM.</li>
+<li><strong>Control</strong> — a PI loop with a "boost to target, then hold" structure keeps
+   pressure on target. If the sensor read ever fails, the fan is cut to 0 (safe).</li>
+<li><strong>Telemetry</strong> — the board advertises over BLE as <code>graboid-01</code> and streams a
+   CSV line (<code>target, measured, duty%, temp</code>) you can watch live in Adafruit
+   Bluefruit Connect's Plotter.</li>
+</ol>
+<p>For the full design rationale (control math, PWM-frequency choice, gotchas, and
+upgrade paths), see <strong><a href="docs/DESIGN.md">docs/DESIGN.md</a></strong>.</p>
+<hr>
+<h2 id="parts-list">Parts list</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Part / link</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MCU board</td>
+<td><a href="https://www.sparkfun.com/sparkfun-pro-micro-esp32-c3.html">SparkFun Pro Micro ESP32-C3</a> (DEV-21925)</td>
+<td>Reads sensor, runs control loop, BLE</td>
+</tr>
+<tr>
+<td>Pressure sensor</td>
+<td><a href="https://www.adafruit.com/product/4633">Adafruit LPS22 — STEMMA QT / Qwiic</a> (PID 4633)</td>
+<td>Barometric pressure over I²C</td>
+</tr>
+<tr>
+<td>Fan driver</td>
+<td><a href="https://www.adafruit.com/product/5648">Adafruit MOSFET Driver</a> (PID 5648)</td>
+<td>Low-side N-MOSFET switch for the blower</td>
+</tr>
+<tr>
+<td>Blower</td>
+<td><a href="docs/BFB1012VH-AF00.pdf">Delta BFB1012VH-AF00</a> (12 V DC blower)</td>
+<td>The fan that inflates the suit (<a href="docs/BFB1012VH-AF00.pdf">datasheet</a>)</td>
+</tr>
+<tr>
+<td>I²C cable</td>
+<td><a href="https://www.sparkfun.com/products/14427">SparkFun Qwiic cable</a> / <a href="https://www.adafruit.com/product/4399">Adafruit STEMMA QT</a></td>
+<td>ESP32 ↔ LPS22 (plug-and-play)</td>
+</tr>
+<tr>
+<td>12 V supply</td>
+<td>Any 12 V DC, <strong>≥ 2 A</strong></td>
+<td>Powers the blower</td>
+</tr>
+<tr>
+<td>12 V→5 V buck <em>(optional)</em></td>
+<td>Any 5 V output, ≥ 500 mA</td>
+<td>Run the ESP32-C3 off the same 12 V rail (untethered)</td>
+</tr>
+</tbody>
+</table>
+<p>The blower draws ~1.5 A typical / 1.8 A max — right at the MOSFET breakout's
+1.5 A continuous rating, so size the 12 V supply with margin and watch the
+breakout temperature under sustained full-speed operation. See
+<a href="docs/DESIGN.md">docs/DESIGN.md §8</a> and the driver-upgrade appendix if you want
+more headroom.</p>
+<hr>
+<h2 id="wiring">Wiring</h2>
+<h3 id="pin-map">Pin map</h3>
+<table>
+<thead>
+<tr>
+<th>Pin</th>
+<th>Role</th>
+<th>Connects to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPIO5</td>
+<td>I²C SDA</td>
+<td>LPS22 SDA (via Qwiic)</td>
+</tr>
+<tr>
+<td>GPIO6</td>
+<td>I²C SCL</td>
+<td>LPS22 SCL (via Qwiic)</td>
+</tr>
+<tr>
+<td>GPIO7</td>
+<td>Fan PWM</td>
+<td>MOSFET driver <code>In</code> (signal)</td>
+</tr>
+<tr>
+<td>GPIO10</td>
+<td>Status LED</td>
+<td>on-board STAT LED (heartbeat)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Note:</strong> On the SparkFun Pro Micro ESP32-C3 the Qwiic connector is wired to
+<strong>GPIO5/6</strong>, <em>not</em> the GPIO8/9 you'll see in generic ESP32-C3 tutorials.</p>
+</blockquote>
+<h3 id="1-pressure-sensor-qwiic-plug-and-play">1. Pressure sensor (Qwiic — plug-and-play)</h3>
+<p>Plug a Qwiic / STEMMA QT cable from the board's Qwiic connector into either
+connector on the LPS22 breakout. That carries power, ground, SDA (GPIO5), and
+SCL (GPIO6) in one cable. The breakout has onboard pull-ups; nothing else to do.
+Default I²C address is <code>0x5D</code>.</p>
+<h3 id="2-fan-mosfet-driver">2. Fan + MOSFET driver</h3>
+<p>The Adafruit driver is a <strong>low-side switch</strong>: it makes/breaks the fan's <em>ground</em>.</p>
+<pre><code>   12V supply (+) ───────────────► V+   (driver input)
+   12V supply (–) ──┬────────────► GND  (driver input)
+                    └────────────► ESP32-C3 GND     ← common ground, REQUIRED
+   ESP32-C3 GPIO7 ──────────────► In   (driver input)
+
+   Fan RED  (+12V) ─────────────► &quot;+&quot;      output screw terminal
+   Fan BLACK (–)   ─────────────► &quot;–&quot;/Out  output screw terminal
+   Fan BLUE (tach) ─────────────► (leave disconnected — reserved for future RPM)
+</code></pre>
+<p><strong>The common ground is mandatory.</strong> With the ESP on USB and the fan on a 12 V
+brick, the two grounds must be tied together or the MOSFET gate has no reference
+and won't switch. The driver's green <code>ON</code> LED shows power; the red <code>Sig</code> LED
+pulses with PWM duty.</p>
+<h3 id="3-powering-the-esp32-c3-two-options">3. Powering the ESP32-C3 (two options)</h3>
+<ul>
+<li><strong>Tethered (development):</strong> USB-C powers the board; the 12 V brick only feeds
+  the fan. Grounds still common (above).</li>
+<li><strong>Untethered (in-costume):</strong> drop the 12 V rail to 5 V with a buck converter
+  and feed the board's <strong><code>VBUS</code></strong> pin (its RT9080 regulator accepts up to 5.5 V).
+  Connect 5 V → <code>VBUS</code>, ground → <code>GND</code>. <strong>Never feed 5 V into <code>3V3</code>/<code>VCC</code></strong> —
+  that's the regulator's output and 5 V there will destroy the chip.</li>
+</ul>
+<blockquote>
+<p><code>VBUS</code> is tied directly to the USB 5 V with no isolation diode on this board.
+Don't power <code>VBUS</code> externally <em>and</em> plug in USB at the same time — pick one
+source, or you'll back-feed your laptop's USB port.</p>
+</blockquote>
+<hr>
+<h2 id="install-flash">Install &amp; flash</h2>
+<h3 id="prerequisites">Prerequisites</h3>
+<ul>
+<li><strong>ESP-IDF v6.0+</strong> (<a href="https://docs.espressif.com/projects/esp-idf/en/latest/esp32c3/get-started/">install guide</a>).
+  Built and tested against v6.0.1.</li>
+<li>The SparkFun Pro Micro ESP32-C3 flashes over its <strong>native USB Serial/JTAG</strong> —
+  no external USB-UART adapter and no DTR/RTS reset trick needed.</li>
+</ul>
+<h3 id="command-line-recommended">Command line (recommended)</h3>
+<pre><code class="language-bash"># 1. Load the ESP-IDF environment (once per shell)
+#    Linux/macOS:
+. $HOME/esp/esp-idf/export.sh
+#    Windows PowerShell (adjust path to your install):
+#    . C:\Espressif\tools\Microsoft.&lt;version&gt;.PowerShell_profile.ps1
+
+# 2. From the firmware/ directory:
+cd firmware
+idf.py set-target esp32c3      # first time only
+idf.py build
+idf.py -p &lt;PORT&gt; flash monitor # PORT = COM3 (Windows) or /dev/ttyACM0 (Linux)
+</code></pre>
+<p>Exit the monitor with <code>Ctrl+]</code>.</p>
+<blockquote>
+<p><strong>Flashing tip:</strong> close any open serial monitor before flashing — the port can
+only be owned by one process at a time. A flash that hangs at <code>Connecting....</code>
+is almost always the monitor still holding the port, or the board mid-reset.
+If it won't connect, hold <strong>BOOT</strong>, tap <strong>RESET</strong>, release <strong>BOOT</strong>, then flash.</p>
+</blockquote>
+<h3 id="vs-code-esp-idf-extension">VS Code (ESP-IDF extension)</h3>
+<p>Open the <strong><code>firmware/</code></strong> folder (not the repo root — the extension needs the
+<code>CMakeLists.txt</code> at the opened folder's root). Set target to <code>esp32c3</code>, pick the
+<strong>built-in USB-JTAG</strong> flash method, then use the Build / Flash / Monitor buttons
+in the status bar.</p>
+<h3 id="first-run">First run</h3>
+<p>With <strong>nothing</strong> plugged into Qwiic, the board boots, advertises over BLE, holds
+the fan at 0, and logs <code>LPS22 not responding ... Retrying</code> once a second — it
+will <strong>not</strong> crash-loop. Plug in the LPS22 and it auto-detects within a second,
+samples its baseline, and enters the control loop. Keep the sensor at ambient
+(suit not sealed) during the first second so the baseline is clean.</p>
+<hr>
+<h2 id="usage-telemetry">Usage &amp; telemetry</h2>
+<p>The serial monitor prints one line per control iteration:</p>
+<pre><code>P=1015.05 hPa  err=+0.16  duty=68%  T=24.5C
+</code></pre>
+<p>Over BLE, the board advertises as <strong><code>graboid-01</code></strong> and exposes the <strong>Nordic UART
+Service (NUS)</strong>. Each iteration it sends one CSV line on the TX characteristic:</p>
+<pre><code>target_hpa,measured_hpa,duty_pct,temp_c
+e.g.  1017.21,1016.98,72.5,24.5
+</code></pre>
+<p>Install <strong><a href="https://learn.adafruit.com/bluefruit-le-connect">Adafruit Bluefruit Connect</a></strong>
+(free, iOS/Android), connect to <code>graboid-01</code>, and open the <strong>Plotter</strong> to watch
+target / measured / duty / temperature live. Any generic BLE tool (nRF Toolbox,
+LightBlue) works too, since NUS is universally supported.</p>
+<hr>
+<h2 id="tuning">Tuning</h2>
+<p>All tuning knobs are <code>#define</code>s at the top of
+<a href="firmware/main/main.c"><code>firmware/main/main.c</code></a> — no need to dig through code:</p>
+<table>
+<thead>
+<tr>
+<th>Knob</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TARGET_OVERPRESSURE_HPA</code></td>
+<td>2.0</td>
+<td>Inflation set-point above ambient baseline</td>
+</tr>
+<tr>
+<td><code>BOOST_BAND_HPA</code></td>
+<td>0.5</td>
+<td>More than this below target → run full speed</td>
+</tr>
+<tr>
+<td><code>DUTY_FEEDFORWARD</code></td>
+<td>0.55</td>
+<td>Starting guess for the "hold" duty</td>
+</tr>
+<tr>
+<td><code>KP</code></td>
+<td>0.50</td>
+<td>Proportional gain (duty per hPa)</td>
+</tr>
+<tr>
+<td><code>KI</code></td>
+<td>0.20</td>
+<td>Integral gain (duty per hPa·s)</td>
+</tr>
+<tr>
+<td><code>DUTY_MIN</code></td>
+<td>0.30</td>
+<td>Stall floor — fans won't spin reliably below this</td>
+</tr>
+<tr>
+<td><code>DUTY_MAX</code></td>
+<td>1.00</td>
+<td>Ceiling (lower it if the MOSFET runs hot)</td>
+</tr>
+<tr>
+<td><code>FAN_PWM_FREQ_HZ</code></td>
+<td>1000</td>
+<td>PWM frequency (see DESIGN.md for why 1 kHz)</td>
+</tr>
+</tbody>
+</table>
+<p>Quick diagnosis:</p>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Duty oscillates fast</td>
+<td>Lower <code>KP</code>, then <code>KI</code></td>
+</tr>
+<tr>
+<td>Pressure sags below target</td>
+<td>Raise <code>KI</code>; confirm <code>DUTY_MAX = 1.0</code></td>
+</tr>
+<tr>
+<td>Fan won't spin at low duty</td>
+<td>Raise <code>DUTY_MIN</code></td>
+</tr>
+<tr>
+<td>Pressure never climbs even at 100%</td>
+<td>Tighten seals; check fan polarity</td>
+</tr>
+<tr>
+<td>Status LED frozen</td>
+<td>I²C/sensor failure — check Qwiic cable &amp; <code>0x5D</code></td>
+</tr>
+<tr>
+<td>MOSFET breakout hot at 100%</td>
+<td>Lower <code>DUTY_MAX</code> or upgrade the driver</td>
+</tr>
+</tbody>
+</table>
+<p>Full tuning and troubleshooting tables are in
+<a href="docs/DESIGN.md">docs/DESIGN.md §10</a>.</p>
+<hr>
+<h2 id="repository-layout">Repository layout</h2>
+<pre><code>costume-dynamic-pressure-fan/
+├── README.md                 this file
+├── README.html               standalone HTML version
+├── LICENSE                   MIT
+├── docs/
+│   ├── DESIGN.md             full system design &amp; rationale
+│   └── BFB1012VH-AF00.pdf    blower datasheet
+└── firmware/                 ESP-IDF project (open THIS folder in VS Code)
+    ├── CMakeLists.txt
+    ├── sdkconfig.defaults    target, USB-JTAG console, NimBLE config
+    └── main/
+        ├── CMakeLists.txt
+        ├── main.c            sensor + PWM + PI control + telemetry
+        ├── ble_nus.c         NimBLE Nordic UART Service server
+        └── ble_nus.h
+</code></pre>
+<hr>
+<h2 id="safety-notes">Safety notes</h2>
+<ul>
+<li><strong>Common ground</strong> between the 12 V and ESP power domains is required.</li>
+<li>The blower current is close to the MOSFET breakout's continuous rating — watch
+  for heat under sustained full-speed operation; lower <code>DUTY_MAX</code> or upgrade the
+  driver if needed.</li>
+<li>The blower's max static pressure is <strong>4.86 hPa</strong>; targeting above that will
+  just stall the fan against the backpressure. The default 2.0 hPa leaves margin.</li>
+<li>Fit a fan guard and observe the blower's polarity (reverse polarity can damage
+  it — see the datasheet's application notes).</li>
+</ul>
+<h2 id="license">License</h2>
+<p>MIT — see <a href="LICENSE">LICENSE</a>.</p>
+<div class="footer">Generated from README.md &middot; Costume Dynamic Pressure Fan</div>
+</body>
+</html>

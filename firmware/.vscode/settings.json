@@ -1,0 +1,7 @@
+{
+    "idf.openOcdConfigs": [
+        "board/esp32c3-builtin.cfg"
+    ],
+    "idf.portWin": "COM3",
+    "idf.port": "/dev/ttyACM0"
+}
