@@ -15,9 +15,7 @@ works for any single-blower inflatable.
 
 ## Demo
 
-[![Watch the demo](docs/demo-poster.jpg)](docs/demo.mp4)
-
-*Click the image to play ([docs/demo.mp4](docs/demo.mp4)).*
+https://github.com/user-attachments/assets/02aacd18-80fb-4aff-8930-c1d5899a8b9b
 
 ---
 
